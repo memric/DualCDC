@@ -28,10 +28,17 @@
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
-
+#define UART_RX_BUF_LEN     1024
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
 
+uint8_t uart_rx_buf[2][UART_RX_BUF_LEN];
+uint32_t uart_rx_ind[2] = {0, 0};
+uint32_t uart_rx_tick[2] = {0, 0};
+uint32_t uart_rx_timeout[2] = {10, 10};
+uint32_t de_pending = 0;
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -218,7 +225,64 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
   /* 6      | bDataBits  |   1   | Number Data bits (5, 6, 7, 8 or 16).          */
   /*******************************************************************************/
     case CDC_SET_LINE_CODING:
+    {
+        UART_HandleTypeDef *huart;
 
+        if (index == 2)
+        {
+            huart = &huart2;
+        }
+        else
+        {
+            huart = &huart1;
+        }
+
+        USBD_CDC_LineCodingTypeDef *line_coding = (USBD_CDC_LineCodingTypeDef *)pbuf;
+        if (line_coding->bitrate == 0 || line_coding->datatype == 0) {
+            break;
+        }
+
+        HAL_UART_AbortReceive_IT(huart);
+
+//        __HAL_UART_DISABLE(huart);
+
+        /*
+         * The maping between USBD_CDC_LineCodingTypeDef and line coding structure.
+         *    dwDTERate   -> line_coding->bitrate
+         *    bCharFormat -> line_coding->format
+         *    bParityType -> line_coding->paritytype
+         *    bDataBits   -> line_coding->datatype
+         */
+        huart->Init.BaudRate = line_coding->bitrate;
+        huart->Init.WordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
+        huart->Init.StopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
+        huart->Init.Parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
+        huart->Init.Mode = UART_MODE_TX_RX;
+        huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
+        huart->Init.OverSampling = UART_OVERSAMPLING_16;
+
+        if (HAL_UART_Init(huart) != HAL_OK)
+        {
+            Error_Handler();
+        }
+
+        uart_rx_timeout[index / 1] = 1000 / (line_coding->bitrate / (line_coding->datatype + 2));
+        if (uart_rx_timeout[index / 1] == 0)
+        {
+            uart_rx_timeout[index / 1] = 1;
+        }
+
+        uart_rx_ind[index / 1] = 0;
+        HAL_UART_Receive_IT(huart, &uart_rx_buf[index / 1][uart_rx_ind[index / 1]], 1);
+
+//        __HAL_UART_ENABLE(huart);
+//        __HAL_UART_ENABLE_IT(huart, UART_IT_IDLE);
+
+//        NVIC_ClearPendingIRQ(uart_ctx->irq_num);
+
+//        HAL_UART_DMAStop(huart);
+//        HAL_UART_Receive_DMA(uart_ctx->huart, (uint8_t *)uart_ctx->buf.data[0], DBL_BUF_TOTAL_LEN);
+    }
     break;
 
     case CDC_GET_LINE_CODING:
@@ -262,7 +326,16 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len, uint16_t index)
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS, index);
 
+#ifdef LOOPBACK
   CDC_Transmit_FS(Buf, *Len, index);
+#else
+  if (index < 2)
+  {
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+  }
+
+  HAL_UART_Transmit_DMA((index < 2) ? &huart1 : &huart2, Buf, *Len);
+#endif
 
   return (USBD_OK);
   /* USER CODE END 6 */
@@ -287,14 +360,129 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len, uint16_t index)
   if (hcdc->TxState != 0){
     return USBD_BUSY;
   }
+
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
+
+  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+
+//  uint16_t rest_len = Len;
+//  uint32_t i;
+//  for (i = 0; result == USBD_OK && i <= Len; rest_len = Len - i) {
+//
+//      if (rest_len >= USB_FS_MAX_PACKET_SIZE) {
+//          USBD_CDC_SetTxBuffer(&hUsbDeviceFS, &Buf[i], USB_FS_MAX_PACKET_SIZE);
+//          i += USB_FS_MAX_PACKET_SIZE;
+//          do {
+//              result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
+//          } while (result == USBD_BUSY);
+//
+//      } else if (rest_len == 0) {
+//          // It's necessary to send zero-length packet to compliance USB protocol.
+//          USBD_CDC_SetTxBuffer(&hUsbDeviceFS, &Buf[0], 0);
+//          do {
+//              result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
+//          } while (result == USBD_BUSY);
+//          break;
+//
+//      } else {
+//          USBD_CDC_SetTxBuffer(&hUsbDeviceFS, &Buf[i], rest_len);
+//          do {
+//              result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
+//          } while (result == USBD_BUSY);
+//          break;
+//
+//      }
+//  }
   /* USER CODE END 7 */
   return result;
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    uint16_t ind = 0;
 
+    if (huart == &huart1)
+    {
+        ind = 0;
+    }
+    else if (huart == &huart2)
+    {
+        ind = 1;
+    }
+    else
+    {
+        return;
+    }
+
+    uart_rx_tick[ind] = HAL_GetTick();
+    uart_rx_ind[ind]++;
+
+    if (uart_rx_ind[ind] >= UART_RX_BUF_LEN)
+    {
+        CDC_Transmit_FS(uart_rx_buf[ind], uart_rx_ind[ind], ind * 2);
+        uart_rx_ind[ind] = 0;
+    }
+
+    HAL_UART_Receive_IT(huart, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart1)
+    {
+        de_pending = 1;
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    uint16_t ind = 0;
+
+    HAL_UART_AbortReceive_IT(huart);
+
+    if (huart == &huart1)
+    {
+        ind = 0;
+    }
+    else if (huart == &huart2)
+    {
+        ind = 1;
+    }
+    else
+    {
+        return;
+    }
+
+    uart_rx_ind[ind] = 0;
+    HAL_UART_Receive_IT(huart, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
+}
+
+void UART_Poll(void)
+{
+    uint16_t ind;
+
+    if (de_pending)
+    {
+        HAL_Delay(1);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+        de_pending = 0;
+    }
+
+    for (ind = 0; ind < 2; ind++)
+    {
+        if (((HAL_GetTick() - uart_rx_tick[ind]) > uart_rx_timeout[ind]) && (uart_rx_ind[ind] > 0))
+        {
+            HAL_UART_AbortReceive_IT(ind == 0 ? &huart1 : &huart2);
+
+            CDC_Transmit_FS(uart_rx_buf[ind], uart_rx_ind[ind], ind * 2);
+            uart_rx_ind[ind] = 0;
+
+            HAL_UART_Receive_IT(ind == 0 ? &huart1 : &huart2, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
+        }
+    }
+}
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
 /**

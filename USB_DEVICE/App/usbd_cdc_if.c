@@ -22,13 +22,15 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-
+#include "trace.h"
+#include <inttypes.h>
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
-#define UART_RX_BUF_LEN     1024
+#define UART_RX_BUF_LEN     256
+#define UART_BYTES2WAIT     3
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
@@ -242,6 +244,13 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
             break;
         }
 
+            TRACE_DEBUG("Set Linecoding. Ind. %"PRIu16"; Params. %"PRIu32":%u:%u:%u\r\n",
+                        index,
+                        line_coding->bitrate,
+                        line_coding->format,
+                        line_coding->paritytype,
+                        line_coding->datatype);
+
         HAL_UART_AbortReceive_IT(huart);
 
 //        __HAL_UART_DISABLE(huart);
@@ -266,14 +275,18 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
             Error_Handler();
         }
 
-        uart_rx_timeout[index / 1] = 1000 / (line_coding->bitrate / (line_coding->datatype + 2));
-        if (uart_rx_timeout[index / 1] == 0)
+            uart_rx_timeout[index / 2] = UART_BYTES2WAIT * 1000
+                / (line_coding->bitrate / (line_coding->datatype + 2));
+
+        if (uart_rx_timeout[index / 2] == 0)
         {
-            uart_rx_timeout[index / 1] = 1;
+            uart_rx_timeout[index / 2] = 1;
         }
 
-        uart_rx_ind[index / 1] = 0;
-        HAL_UART_Receive_IT(huart, &uart_rx_buf[index / 1][uart_rx_ind[index / 1]], 1);
+        TRACE_DEBUG("UART %"PRIu16" timeout: %"PRIu32" ms\r\n", index / 2, uart_rx_timeout[index / 2]);
+
+        uart_rx_ind[index / 2] = 0;
+        HAL_UART_Receive_IT(huart, &uart_rx_buf[index / 2][uart_rx_ind[index / 2]], 1);
 
 //        __HAL_UART_ENABLE(huart);
 //        __HAL_UART_ENABLE_IT(huart, UART_IT_IDLE);
@@ -331,7 +344,7 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len, uint16_t index)
 #else
   if (index < 2)
   {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
   }
 
   HAL_UART_Transmit_DMA((index < 2) ? &huart1 : &huart2, Buf, *Len);
@@ -421,6 +434,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
     if (uart_rx_ind[ind] >= UART_RX_BUF_LEN)
     {
+        TRACE_DEBUG("Buffer is full. UART %d\r\n", ind);
+
         CDC_Transmit_FS(uart_rx_buf[ind], uart_rx_ind[ind], ind * 2);
         uart_rx_ind[ind] = 0;
     }
@@ -433,6 +448,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     if (huart == &huart1)
     {
         de_pending = 1;
+        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET);
     }
 }
 
@@ -455,6 +471,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         return;
     }
 
+    TRACE_ERR("UART %"PRIu16" err %"PRIu32"\r\n", ind, HAL_UART_GetError(huart));
+
     uart_rx_ind[ind] = 0;
     HAL_UART_Receive_IT(huart, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
 }
@@ -466,7 +484,7 @@ void UART_Poll(void)
     if (de_pending)
     {
         HAL_Delay(1);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+//        HAL_GPIO_WritePin(DE_Pin, DE_GPIO_Port, GPIO_PIN_RESET);
         de_pending = 0;
     }
 
@@ -474,6 +492,8 @@ void UART_Poll(void)
     {
         if (((HAL_GetTick() - uart_rx_tick[ind]) > uart_rx_timeout[ind]) && (uart_rx_ind[ind] > 0))
         {
+            TRACE_DEBUG("Data ready. UART %"PRIu16"; Size %"PRIu32"\r\n", ind, uart_rx_ind[ind]);
+
             HAL_UART_AbortReceive_IT(ind == 0 ? &huart1 : &huart2);
 
             CDC_Transmit_FS(uart_rx_buf[ind], uart_rx_ind[ind], ind * 2);

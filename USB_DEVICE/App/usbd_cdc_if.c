@@ -24,23 +24,47 @@
 /* USER CODE BEGIN INCLUDE */
 #include "trace.h"
 #include <inttypes.h>
+#include "ring_buf.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
 /* Private macro -------------------------------------------------------------*/
-#define UART_RX_BUF_LEN     256
+#define UART_RX_BUF_LEN     512
+#define UART_TX_BUF_LEN     512
+#define USB_TX_BUF_LEN      256
 #define UART_BYTES2WAIT     3
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 
-uint8_t uart_rx_buf[2][UART_RX_BUF_LEN];
-uint32_t uart_rx_ind[2] = {0, 0};
-uint32_t uart_rx_tick[2] = {0, 0};
-uint32_t uart_rx_timeout[2] = {10, 10};
+typedef struct {
+        const char *name;
+        UART_HandleTypeDef *huart;
+        uint8_t rx_byte;
+        ring_buf_t *pRbuf;
+        uint32_t last_rx_tick;
+        uint32_t rx_timeout;
+        uint8_t *pTbuf;
+        uint32_t tx_len;
+} uart_handle_t;
+
 uint32_t de_pending = 0;
+
+extern void Lock(void *arg);
+extern void Unlock(void *arg);
+
+RING_BUF_DEFINE(uart1_rx, UART_RX_BUF_LEN, uint8_t, Lock, Unlock);
+RING_BUF_DEFINE(uart2_rx, UART_RX_BUF_LEN, uint8_t, Lock, Unlock);
+uint8_t uart1_tx[UART_TX_BUF_LEN];
+uint8_t uart2_tx[UART_TX_BUF_LEN];
+
+uart_handle_t hUART[] = {
+{"UART1", &huart1, 0, pRING_BUF(uart1_rx), 0, 10, uart1_tx, 0},
+{"UART2", &huart2, 0, pRING_BUF(uart2_rx), 0, 10, uart2_tx, 0}
+};
+
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -136,7 +160,32 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
 static int8_t CDC_Receive_FS(uint8_t* pbuf, uint32_t *Len, uint16_t index);
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
+static inline uart_handle_t *get_uart_handle(UART_HandleTypeDef *huart)
+{
+    uart_handle_t *uart = NULL;
 
+    if (huart == &huart1)
+    {
+        uart = &hUART[0];
+    }
+    else if (huart == &huart2)
+    {
+        uart = &hUART[1];
+    }
+
+#if 0
+    for (ind = 0; ind < sizeof(hUART) / sizeof(uart_handle_t); ind++)
+    {
+        if (hUART[ind].huart == huart)
+        {
+            uart = &hUART[ind];
+            break;
+        }
+    }
+#endif
+
+    return uart;
+}
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
 
 /**
@@ -228,16 +277,7 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
   /*******************************************************************************/
     case CDC_SET_LINE_CODING:
     {
-        UART_HandleTypeDef *huart;
-
-        if (index == 2)
-        {
-            huart = &huart2;
-        }
-        else
-        {
-            huart = &huart1;
-        }
+        uart_handle_t *uart = &hUART[index / 2];
 
         USBD_CDC_LineCodingTypeDef *line_coding = (USBD_CDC_LineCodingTypeDef *)pbuf;
         if (line_coding->bitrate == 0 || line_coding->datatype == 0) {
@@ -251,9 +291,8 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
                         line_coding->paritytype,
                         line_coding->datatype);
 
-        HAL_UART_AbortReceive_IT(huart);
-
-//        __HAL_UART_DISABLE(huart);
+        HAL_UART_AbortReceive_IT(uart->huart);
+        HAL_UART_AbortTransmit_IT(uart->huart);
 
         /*
          * The maping between USBD_CDC_LineCodingTypeDef and line coding structure.
@@ -262,39 +301,35 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
          *    bParityType -> line_coding->paritytype
          *    bDataBits   -> line_coding->datatype
          */
-        huart->Init.BaudRate = line_coding->bitrate;
-        huart->Init.WordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
-        huart->Init.StopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
-        huart->Init.Parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
-        huart->Init.Mode = UART_MODE_TX_RX;
-        huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
-        huart->Init.OverSampling = UART_OVERSAMPLING_16;
+        uart->huart->Init.BaudRate = line_coding->bitrate;
+        uart->huart->Init.WordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
+        uart->huart->Init.StopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
+        uart->huart->Init.Parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
+        uart->huart->Init.Mode = UART_MODE_TX_RX;
+        uart->huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
+        uart->huart->Init.OverSampling = UART_OVERSAMPLING_16;
 
-        if (HAL_UART_Init(huart) != HAL_OK)
+        if (HAL_UART_Init(uart->huart) != HAL_OK)
         {
             Error_Handler();
         }
 
-            uart_rx_timeout[index / 2] = UART_BYTES2WAIT * 1000
-                / (line_coding->bitrate / (line_coding->datatype + 2));
+        /* Set ring buffer reset state */
+        RingBuf_Init(uart->pRbuf);
 
-        if (uart_rx_timeout[index / 2] == 0)
+        uart->rx_timeout = UART_BYTES2WAIT * 1000
+            / (line_coding->bitrate / (line_coding->datatype + 2));
+
+        if (uart->rx_timeout == 0)
         {
-            uart_rx_timeout[index / 2] = 1;
+            uart->rx_timeout = 1;
         }
 
-        TRACE_DEBUG("UART %"PRIu16" timeout: %"PRIu32" ms\r\n", index / 2, uart_rx_timeout[index / 2]);
+        uart->tx_len = 0;
 
-        uart_rx_ind[index / 2] = 0;
-        HAL_UART_Receive_IT(huart, &uart_rx_buf[index / 2][uart_rx_ind[index / 2]], 1);
+        TRACE_DEBUG("%s timeout: %"PRIu32" ms\r\n", uart->name, uart->rx_timeout);
 
-//        __HAL_UART_ENABLE(huart);
-//        __HAL_UART_ENABLE_IT(huart, UART_IT_IDLE);
-
-//        NVIC_ClearPendingIRQ(uart_ctx->irq_num);
-
-//        HAL_UART_DMAStop(huart);
-//        HAL_UART_Receive_DMA(uart_ctx->huart, (uint8_t *)uart_ctx->buf.data[0], DBL_BUF_TOTAL_LEN);
+        HAL_UART_Receive_IT(uart->huart, &uart->rx_byte, 1);
     }
     break;
 
@@ -342,12 +377,17 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len, uint16_t index)
 #ifdef LOOPBACK
   CDC_Transmit_FS(Buf, *Len, index);
 #else
-  if (index < 2)
-  {
-      HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
-  }
+  uart_handle_t *uart = &hUART[index / 2];
 
-  HAL_UART_Transmit_DMA((index < 2) ? &huart1 : &huart2, Buf, *Len);
+  if (uart->tx_len == 0)
+  {
+      memcpy(uart->pTbuf, Buf, *Len);
+      uart->tx_len = *Len;
+  }
+  else
+  {
+      return USBD_FAIL;
+  }
 #endif
 
   return (USBD_OK);
@@ -376,37 +416,6 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len, uint16_t index)
 
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
-
-  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-
-//  uint16_t rest_len = Len;
-//  uint32_t i;
-//  for (i = 0; result == USBD_OK && i <= Len; rest_len = Len - i) {
-//
-//      if (rest_len >= USB_FS_MAX_PACKET_SIZE) {
-//          USBD_CDC_SetTxBuffer(&hUsbDeviceFS, &Buf[i], USB_FS_MAX_PACKET_SIZE);
-//          i += USB_FS_MAX_PACKET_SIZE;
-//          do {
-//              result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
-//          } while (result == USBD_BUSY);
-//
-//      } else if (rest_len == 0) {
-//          // It's necessary to send zero-length packet to compliance USB protocol.
-//          USBD_CDC_SetTxBuffer(&hUsbDeviceFS, &Buf[0], 0);
-//          do {
-//              result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
-//          } while (result == USBD_BUSY);
-//          break;
-//
-//      } else {
-//          USBD_CDC_SetTxBuffer(&hUsbDeviceFS, &Buf[i], rest_len);
-//          do {
-//              result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
-//          } while (result == USBD_BUSY);
-//          break;
-//
-//      }
-//  }
   /* USER CODE END 7 */
   return result;
 }
@@ -414,92 +423,119 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len, uint16_t index)
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    uint16_t ind = 0;
+    uart_handle_t *uart = get_uart_handle(huart);
 
-    if (huart == &huart1)
+    if (uart != NULL)
     {
-        ind = 0;
-    }
-    else if (huart == &huart2)
-    {
-        ind = 1;
-    }
-    else
-    {
-        return;
-    }
+        /* Save reception tick */
+        uart->last_rx_tick = HAL_GetTick();
 
-    uart_rx_tick[ind] = HAL_GetTick();
-    uart_rx_ind[ind]++;
+        /* Save byte to buffer */
+        RingBuf_Push(uart->pRbuf, &uart->rx_byte, 1);
 
-    if (uart_rx_ind[ind] >= UART_RX_BUF_LEN)
-    {
-        TRACE_DEBUG("Buffer is full. UART %d\r\n", ind);
-
-        CDC_Transmit_FS(uart_rx_buf[ind], uart_rx_ind[ind], ind * 2);
-        uart_rx_ind[ind] = 0;
+        /* Continue reception */
+        HAL_UART_Receive_IT(uart->huart, &uart->rx_byte, 1);
     }
-
-    HAL_UART_Receive_IT(huart, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
+    uart_handle_t *uart = get_uart_handle(huart);
+
+    uart->tx_len = 0;
+
     if (huart == &huart1)
     {
         de_pending = 1;
-        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET);
+//        HAL_UART_Receive_IT(huart, &hUART[0].rx_byte, 1);
+//        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET);
     }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    uint16_t ind = 0;
+    uart_handle_t *uart = get_uart_handle(huart);
 
-    HAL_UART_AbortReceive_IT(huart);
-
-    if (huart == &huart1)
-    {
-        ind = 0;
-    }
-    else if (huart == &huart2)
-    {
-        ind = 1;
-    }
-    else
-    {
-        return;
-    }
-
-    TRACE_ERR("UART %"PRIu16" err %"PRIu32"\r\n", ind, HAL_UART_GetError(huart));
-
-    uart_rx_ind[ind] = 0;
-    HAL_UART_Receive_IT(huart, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
+//    if (uart != NULL)
+//    {
+//        HAL_UART_AbortReceive_IT(huart);
+//
+//        TRACE_ERR("%s err %"PRIu32"\r\n", uart->name, HAL_UART_GetError(huart));
+//
+//        /* Continue reception */
+//        HAL_UART_Receive_IT(uart->huart, &uart->rx_byte, 1);
+//    }
 }
 
 void UART_Poll(void)
 {
     uint16_t ind;
+    uart_handle_t *uart = NULL;
+    uint8_t usb_tx_buf[USB_TX_BUF_LEN];
+    uint8_t err;
 
     if (de_pending)
     {
-        HAL_Delay(1);
-//        HAL_GPIO_WritePin(DE_Pin, DE_GPIO_Port, GPIO_PIN_RESET);
+//        HAL_Delay(3);
+        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET);
+//        HAL_Delay(3);
+        /* Continue reception */
+//        HAL_UART_Receive_IT(&huart1, &hUART[0].rx_byte, 1);
         de_pending = 0;
     }
 
-    for (ind = 0; ind < 2; ind++)
+    for (ind = 0; ind < sizeof(hUART) / sizeof(uart_handle_t); ind++)
     {
-        if (((HAL_GetTick() - uart_rx_tick[ind]) > uart_rx_timeout[ind]) && (uart_rx_ind[ind] > 0))
+        uart = &hUART[ind];
+
+        /* Check for Tx first */
+        if ((uart->tx_len > 0) && (HAL_UART_GetState(uart->huart) != HAL_UART_STATE_BUSY_TX))
         {
-            TRACE_DEBUG("Data ready. UART %"PRIu16"; Size %"PRIu32"\r\n", ind, uart_rx_ind[ind]);
+            if (uart->huart == &huart1)
+            {
+//                HAL_UART_AbortReceive_IT(uart->huart);
+//
+//                HAL_Delay(3);
 
-            HAL_UART_AbortReceive_IT(ind == 0 ? &huart1 : &huart2);
+                /* Set DE signal UP for RS485 */
+                HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
+//                HAL_Delay(3);
+            }
 
-            CDC_Transmit_FS(uart_rx_buf[ind], uart_rx_ind[ind], ind * 2);
-            uart_rx_ind[ind] = 0;
+            TRACE_DEBUG("Tx data ready. %s; Size %"PRIu32"\r\n", uart->name, uart->tx_len);
 
-            HAL_UART_Receive_IT(ind == 0 ? &huart1 : &huart2, &uart_rx_buf[ind][uart_rx_ind[ind]], 1);
+            /* Have pending data for Tx. Start DMA transfer */
+            HAL_UART_Transmit_DMA(uart->huart, uart->pTbuf, uart->tx_len);
+        }
+
+        /* Check for Rx data */
+        if (((HAL_GetTick() - uart->last_rx_tick) > uart->rx_timeout)
+            && (RingBuf_GetNum(uart->pRbuf) > 0))
+        {
+            uint16_t len = RingBuf_Pop(uart->pRbuf, usb_tx_buf, USB_TX_BUF_LEN);
+
+            TRACE_DEBUG("Rx data ready. %s; Size %"PRIu16"\r\n", uart->name, len);
+
+            uint32_t i;
+            for (i = 0; i < len; i++)
+            {
+                TRACE_DEBUG("%02X ", usb_tx_buf[i]);
+            }
+            TRACE_DEBUG("\r\n");
+
+            if (uart->huart == &huart1)
+            {
+//                HAL_UART_AbortReceive_IT(uart->huart);
+            }
+
+            do
+            {
+                err = CDC_Transmit_FS(usb_tx_buf, len, ind * 2);
+            }
+            while (err != USBD_OK);
+
+
+            HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
         }
     }
 }

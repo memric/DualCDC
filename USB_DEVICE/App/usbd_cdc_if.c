@@ -33,12 +33,16 @@
 #define UART_RX_BUF_LEN     512
 #define UART_TX_BUF_LEN     512
 #define USB_TX_BUF_LEN      256
-#define UART_BYTES2WAIT     3
+#define UART_BYTES2WAIT     3.5
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 
+/**
+ * @brief   UART instance type
+ *
+ */
 typedef struct {
         const char *name;
         UART_HandleTypeDef *huart;
@@ -49,8 +53,6 @@ typedef struct {
         uint8_t *pTbuf;
         uint32_t tx_len;
 } uart_handle_t;
-
-uint32_t de_pending = 0;
 
 extern void Lock(void *arg);
 extern void Unlock(void *arg);
@@ -279,20 +281,13 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
     {
         uart_handle_t *uart = &hUART[index / 2];
 
-        USBD_CDC_LineCodingTypeDef *line_coding = (USBD_CDC_LineCodingTypeDef *)pbuf;
-        if (line_coding->bitrate == 0 || line_coding->datatype == 0) {
+        USBD_CDC_LineCodingTypeDef *line_coding = (USBD_CDC_LineCodingTypeDef*) pbuf;
+        if (line_coding->bitrate == 0 || line_coding->datatype == 0)
+        {
             break;
         }
 
-            TRACE_DEBUG("Set Linecoding. Ind. %"PRIu16"; Params. %"PRIu32":%u:%u:%u\r\n",
-                        index,
-                        line_coding->bitrate,
-                        line_coding->format,
-                        line_coding->paritytype,
-                        line_coding->datatype);
-
-        HAL_UART_AbortReceive_IT(uart->huart);
-        HAL_UART_AbortTransmit_IT(uart->huart);
+        TRACE_DEBUG("Set Linecoding. Ind. %"PRIu16"\r\n", index);
 
         /*
          * The maping between USBD_CDC_LineCodingTypeDef and line coding structure.
@@ -301,34 +296,65 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
          *    bParityType -> line_coding->paritytype
          *    bDataBits   -> line_coding->datatype
          */
-        uart->huart->Init.BaudRate = line_coding->bitrate;
-        uart->huart->Init.WordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
-        uart->huart->Init.StopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
-        uart->huart->Init.Parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
-        uart->huart->Init.Mode = UART_MODE_TX_RX;
-        uart->huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
-        uart->huart->Init.OverSampling = UART_OVERSAMPLING_16;
+        uint32_t baudRate = line_coding->bitrate;
+        uint32_t wordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
+        uint32_t stopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
+        uint32_t parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
 
-        if (HAL_UART_Init(uart->huart) != HAL_OK)
+        if ((uart->huart->Init.BaudRate != baudRate) ||
+            (uart->huart->Init.WordLength != wordLength) ||
+            (uart->huart->Init.StopBits != stopBits) ||
+            (uart->huart->Init.Parity != parity))
         {
-            Error_Handler();
+            /* Update settings */
+            TRACE_DEBUG("Params. %"PRIu32":%u:%u:%u\r\n",
+                        line_coding->bitrate,
+                        line_coding->format,
+                        line_coding->paritytype,
+                        line_coding->datatype);
+
+            HAL_UART_AbortReceive_IT(uart->huart);
+            HAL_UART_AbortTransmit_IT(uart->huart);
+
+            /*
+             * The maping between USBD_CDC_LineCodingTypeDef and line coding structure.
+             *    dwDTERate   -> line_coding->bitrate
+             *    bCharFormat -> line_coding->format
+             *    bParityType -> line_coding->paritytype
+             *    bDataBits   -> line_coding->datatype
+             */
+            uart->huart->Init.BaudRate = line_coding->bitrate;
+            uart->huart->Init.WordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
+            uart->huart->Init.StopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
+            uart->huart->Init.Parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
+            uart->huart->Init.Mode = UART_MODE_TX_RX;
+            uart->huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
+            uart->huart->Init.OverSampling = UART_OVERSAMPLING_16;
+
+            if (HAL_UART_Init(uart->huart) != HAL_OK)
+            {
+                Error_Handler();
+            }
+
+            /* Set ring buffer reset state */
+            RingBuf_Init(uart->pRbuf);
+
+            /* Calculate timeout */
+            uart->rx_timeout = UART_BYTES2WAIT * 1000
+                / (line_coding->bitrate / (line_coding->datatype + 2));
+
+            if (uart->rx_timeout == 0)
+            {
+                uart->rx_timeout = 1;
+            }
+
+            uart->tx_len = 0;
+
+            TRACE_DEBUG("%s timeout: %"PRIu32" ms\r\n", uart->name, uart->rx_timeout);
+
         }
 
-        /* Set ring buffer reset state */
-        RingBuf_Init(uart->pRbuf);
-
-        uart->rx_timeout = UART_BYTES2WAIT * 1000
-            / (line_coding->bitrate / (line_coding->datatype + 2));
-
-        if (uart->rx_timeout == 0)
-        {
-            uart->rx_timeout = 1;
-        }
-
-        uart->tx_len = 0;
-
-        TRACE_DEBUG("%s timeout: %"PRIu32" ms\r\n", uart->name, uart->rx_timeout);
-
+        /* Start or continue reception */
         HAL_UART_Receive_IT(uart->huart, &uart->rx_byte, 1);
     }
     break;
@@ -442,13 +468,14 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     uart_handle_t *uart = get_uart_handle(huart);
 
-    uart->tx_len = 0;
-
-    if (huart == &huart1)
+    if (uart != NULL)
     {
-        de_pending = 1;
-//        HAL_UART_Receive_IT(huart, &hUART[0].rx_byte, 1);
-//        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET);
+        uart->tx_len = 0;
+
+        if (huart == &huart1)
+        {
+            HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET); //TODO Use us timer
+        }
     }
 }
 
@@ -456,15 +483,15 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     uart_handle_t *uart = get_uart_handle(huart);
 
-//    if (uart != NULL)
-//    {
-//        HAL_UART_AbortReceive_IT(huart);
-//
-//        TRACE_ERR("%s err %"PRIu32"\r\n", uart->name, HAL_UART_GetError(huart));
-//
-//        /* Continue reception */
-//        HAL_UART_Receive_IT(uart->huart, &uart->rx_byte, 1);
-//    }
+    if (uart != NULL)
+    {
+        HAL_UART_AbortReceive_IT(huart);
+
+        TRACE_ERR("%s err %"PRIu32"\r\n", uart->name, HAL_UART_GetError(huart));
+
+        /* Continue reception */
+        HAL_UART_Receive_IT(uart->huart, &uart->rx_byte, 1);
+    }
 }
 
 void UART_Poll(void)
@@ -474,32 +501,18 @@ void UART_Poll(void)
     uint8_t usb_tx_buf[USB_TX_BUF_LEN];
     uint8_t err;
 
-    if (de_pending)
-    {
-//        HAL_Delay(3);
-        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET);
-//        HAL_Delay(3);
-        /* Continue reception */
-//        HAL_UART_Receive_IT(&huart1, &hUART[0].rx_byte, 1);
-        de_pending = 0;
-    }
-
     for (ind = 0; ind < sizeof(hUART) / sizeof(uart_handle_t); ind++)
     {
         uart = &hUART[ind];
 
         /* Check for Tx first */
-        if ((uart->tx_len > 0) && (HAL_UART_GetState(uart->huart) != HAL_UART_STATE_BUSY_TX))
+        if ((uart->tx_len > 0)
+            && ((HAL_UART_GetState(uart->huart) & HAL_UART_STATE_BUSY_TX) == HAL_UART_STATE_READY))
         {
             if (uart->huart == &huart1)
             {
-//                HAL_UART_AbortReceive_IT(uart->huart);
-//
-//                HAL_Delay(3);
-
                 /* Set DE signal UP for RS485 */
-                HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
-//                HAL_Delay(3);
+                HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET); //TODO Use us timer
             }
 
             TRACE_DEBUG("Tx data ready. %s; Size %"PRIu32"\r\n", uart->name, uart->tx_len);
@@ -523,17 +536,11 @@ void UART_Poll(void)
             }
             TRACE_DEBUG("\r\n");
 
-            if (uart->huart == &huart1)
-            {
-//                HAL_UART_AbortReceive_IT(uart->huart);
-            }
-
             do
             {
                 err = CDC_Transmit_FS(usb_tx_buf, len, ind * 2);
             }
             while (err != USBD_OK);
-
 
             HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
         }

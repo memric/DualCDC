@@ -25,6 +25,7 @@
 #include "trace.h"
 #include <inttypes.h>
 #include "ring_buf.h"
+#include "us_timer.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,10 +35,12 @@
 #define UART_TX_BUF_LEN     512
 #define USB_TX_BUF_LEN      256
 #define UART_BYTES2WAIT     3.5
+#define DE_WAIT_US          100
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
+extern TIM_HandleTypeDef htim1;
 
 /**
  * @brief   UART instance type
@@ -67,6 +70,7 @@ uart_handle_t hUART[] = {
 {"UART2", &huart2, 0, pRING_BUF(uart2_rx), 0, 10, uart2_tx, 0}
 };
 
+static uint8_t de_pending = 0;
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -249,15 +253,15 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
     break;
 
     case CDC_SET_COMM_FEATURE:
-
+        TRACE_DEBUG("Set comm feature. Ind. %"PRIu16"\r\n", index);
     break;
 
     case CDC_GET_COMM_FEATURE:
-
+        TRACE_DEBUG("Get comm feature. Ind. %"PRIu16"\r\n", index);
     break;
 
     case CDC_CLEAR_COMM_FEATURE:
-
+        TRACE_DEBUG("Clear comm feature. Ind. %"PRIu16"\r\n", index);
     break;
 
   /*******************************************************************************/
@@ -279,6 +283,8 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
   /*******************************************************************************/
     case CDC_SET_LINE_CODING:
     {
+        TRACE_DEBUG("Set Linecoding. Ind. %"PRIu16"\r\n", index);
+
         uart_handle_t *uart = &hUART[index / 2];
 
         USBD_CDC_LineCodingTypeDef *line_coding = (USBD_CDC_LineCodingTypeDef*) pbuf;
@@ -287,8 +293,6 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
             break;
         }
 
-        TRACE_DEBUG("Set Linecoding. Ind. %"PRIu16"\r\n", index);
-
         /*
          * The maping between USBD_CDC_LineCodingTypeDef and line coding structure.
          *    dwDTERate   -> line_coding->bitrate
@@ -296,10 +300,10 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
          *    bParityType -> line_coding->paritytype
          *    bDataBits   -> line_coding->datatype
          */
-        uint32_t baudRate = line_coding->bitrate;
+        uint32_t baudRate   = line_coding->bitrate;
         uint32_t wordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
-        uint32_t stopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
-        uint32_t parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
+        uint32_t stopBits   = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
+        uint32_t parity     = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
 
         if ((uart->huart->Init.BaudRate != baudRate) ||
             (uart->huart->Init.WordLength != wordLength) ||
@@ -323,13 +327,13 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
              *    bParityType -> line_coding->paritytype
              *    bDataBits   -> line_coding->datatype
              */
-            uart->huart->Init.BaudRate = line_coding->bitrate;
-            uart->huart->Init.WordLength = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
-            uart->huart->Init.StopBits = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
-            uart->huart->Init.Parity = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
-            uart->huart->Init.Mode = UART_MODE_TX_RX;
-            uart->huart->Init.HwFlowCtl = UART_HWCONTROL_NONE;
-            uart->huart->Init.OverSampling = UART_OVERSAMPLING_16;
+            uart->huart->Init.BaudRate      = line_coding->bitrate;
+            uart->huart->Init.WordLength    = (line_coding->datatype == 8) ? UART_WORDLENGTH_8B : UART_WORDLENGTH_9B;
+            uart->huart->Init.StopBits      = (line_coding->format == 0) ? UART_STOPBITS_1 : UART_STOPBITS_2;
+            uart->huart->Init.Parity        = (line_coding->paritytype == 0) ? UART_PARITY_NONE : (line_coding->paritytype == 1) ? UART_PARITY_ODD : UART_PARITY_EVEN;
+            uart->huart->Init.Mode          = UART_MODE_TX_RX;
+            uart->huart->Init.HwFlowCtl     = UART_HWCONTROL_NONE;
+            uart->huart->Init.OverSampling  = UART_OVERSAMPLING_16;
 
             if (HAL_UART_Init(uart->huart) != HAL_OK)
             {
@@ -360,15 +364,26 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
     break;
 
     case CDC_GET_LINE_CODING:
+    {
+        TRACE_DEBUG("Get Linecoding. Ind. %"PRIu16"\r\n", index);
 
+        uart_handle_t *uart = &hUART[index / 2];
+
+        USBD_CDC_LineCodingTypeDef *line_coding = (USBD_CDC_LineCodingTypeDef*) pbuf;
+
+        line_coding->bitrate = uart->huart->Init.BaudRate;
+        line_coding->datatype = (uart->huart->Init.WordLength == UART_WORDLENGTH_9B) ? 9 : 8;
+        line_coding->format = (uart->huart->Init.StopBits == UART_STOPBITS_2) ? 2 : 0;
+        line_coding->paritytype = (uart->huart->Init.Parity == UART_PARITY_EVEN) ? 2 : (uart->huart->Init.Parity == UART_PARITY_ODD) ? 1 : 0;
+    }
     break;
 
     case CDC_SET_CONTROL_LINE_STATE:
-
+        TRACE_DEBUG("Set Control line state. Ind. %"PRIu16"\r\n", index);
     break;
 
     case CDC_SEND_BREAK:
-
+        TRACE_DEBUG("Set Break. Ind. %"PRIu16"\r\n", index);
     break;
 
   default:
@@ -474,7 +489,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
         if (huart == &huart1)
         {
-            HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET); //TODO Use us timer
+            de_pending = 1;
         }
     }
 }
@@ -501,6 +516,15 @@ void UART_Poll(void)
     uint8_t usb_tx_buf[USB_TX_BUF_LEN];
     uint8_t err;
 
+    /* Check if DE signal need to be set low */
+    if (de_pending)
+    {
+        us_timer_start(&htim1, DE_WAIT_US);
+        HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET); //TODO Use us timer
+
+        de_pending = 0;
+    }
+
     for (ind = 0; ind < sizeof(hUART) / sizeof(uart_handle_t); ind++)
     {
         uart = &hUART[ind];
@@ -512,7 +536,8 @@ void UART_Poll(void)
             if (uart->huart == &huart1)
             {
                 /* Set DE signal UP for RS485 */
-                HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET); //TODO Use us timer
+                us_timer_start(&htim1, DE_WAIT_US);
+                HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
             }
 
             TRACE_DEBUG("Tx data ready. %s; Size %"PRIu32"\r\n", uart->name, uart->tx_len);

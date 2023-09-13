@@ -25,6 +25,7 @@
 #include "usbd_cdc_if.h"
 #include "trace.h"
 #include "ring_buf.h"
+#include "us_timer.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -116,8 +117,11 @@ int main(void)
   RING_BUF_SET_LOCK(trace, Unlock);
   RingBuf_Init(pRING_BUF(trace));
 
-  TRACE("--- System Start ---\r\n");
+#ifndef DEBUG
+  MX_IWDG_Init();
+#endif
 
+  TRACE_OK("--- System Start ---\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -137,6 +141,10 @@ int main(void)
 
           HAL_UART_Transmit_DMA(&huart3, print_out, len);
       }
+
+#ifndef DEBUG
+        HAL_IWDG_Refresh(&hiwdg);
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -460,6 +468,14 @@ void Unlock(void *arg)
 int _write(int file, char *ptr, int len)
 {
     return (int) RingBuf_Push(pRING_BUF(trace), ptr, len);
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim == &htim1)
+    {
+        us_timer_callback(&htim1);
+    }
 }
 /* USER CODE END 4 */
 

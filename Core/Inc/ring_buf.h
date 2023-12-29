@@ -27,7 +27,7 @@ typedef struct {
         void *pBuf;                     /*!< Pointer to buffer storage */
         void *pHead;                    /*!< Head pointer */
         void *pTail;                    /*!< Tail pointer */
-        void (* Lock)(void *arg);       /*!< Unlock function pointer */
+        void (* Lock)(void *arg);       /*!< Lock function pointer */
         void (* Unlock)(void *arg);     /*!< Unlock function pointer */
 } ring_buf_t;
 

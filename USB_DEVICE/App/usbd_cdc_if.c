@@ -431,6 +431,8 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len, uint16_t index)
   }
 #endif
 
+  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+
   return (USBD_OK);
   /* USER CODE END 6 */
 }
@@ -457,6 +459,9 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len, uint16_t index)
 
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS, index);
+
+  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+
   /* USER CODE END 7 */
   return result;
 }
@@ -566,8 +571,6 @@ void UART_Poll(void)
                 err = CDC_Transmit_FS(usb_tx_buf, len, ind * 2);
             }
             while (err != USBD_OK);
-
-            HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
         }
     }
 }

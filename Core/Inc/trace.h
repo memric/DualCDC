@@ -29,18 +29,6 @@
 #define TRACE_USE_ESC			1
 #endif
 
-#ifdef USE_SEGGER_SYSVIEW
-#define SEGGER_TRACE			SEGGER_SYSVIEW_PrintfHost
-#define SEGGER_TRACE_ERR		SEGGER_SYSVIEW_ErrorfHost
-#define SEGGER_TRACE_WRN		SEGGER_SYSVIEW_WarnfHost
-#define SEGGER_TRACE_IRQ		SEGGER_SYSVIEW_PrintfHost
-#else
-#define SEGGER_TRACE(msg...)
-#define SEGGER_TRACE_ERR(msg...)
-#define SEGGER_TRACE_WRN(msg...)
-#define SEGGER_TRACE_IRQ(msg...)
-#endif /*USE_SEGGER_SYSVIEW*/
-
 #if TRACE_USE_ESC
 #define TRACE_BLACK()			TRACE_OUT("\e[30m")
 #define TRACE_RED()				TRACE_OUT("\e[31m")
@@ -90,29 +78,29 @@
 #endif
 
 #if TRACE_LEVEL > TRACE_LEVEL_DISABLE
-#define TRACE_ERR(msg...)		SEGGER_TRACE_ERR(msg); TRACE_RED(); TRACE_OUT(msg); TRACE_ATTR_OFF()
-#define TRACE_OK(msg...)		SEGGER_TRACE(msg); TRACE_GREEN(); TRACE_OUT(msg); TRACE_ATTR_OFF()
+#define TRACE_ERR(msg...)		TRACE_RED(); TRACE_OUT(msg); TRACE_ATTR_OFF()
+#define TRACE_OK(msg...)		TRACE_GREEN(); TRACE_OUT(msg); TRACE_ATTR_OFF()
 #else
 #define TRACE_ERR(msg...)
 #define TRACE_OK(msg...)
 #endif /*TRACE_LEVEL > TRACE_LEVEL_DISABLE*/
 #if TRACE_LEVEL > TRACE_LEVEL_ERROR
-#define TRACE_WRN(msg...)		SEGGER_TRACE_WRN(msg); TRACE_YELLOW(); TRACE_OUT(msg); TRACE_ATTR_OFF()
+#define TRACE_WRN(msg...)		TRACE_YELLOW(); TRACE_OUT(msg); TRACE_ATTR_OFF()
 #else
 #define TRACE_WRN(msg...)
 #endif /*TRACE_LEVEL > TRACE_LEVEL_ERROR*/
 #if TRACE_LEVEL > TRACE_LEVEL_WARNING
-#define TRACE_INFO(msg...)		SEGGER_TRACE(msg); TRACE_OUT(msg)
+#define TRACE_INFO(msg...)		TRACE_OUT(msg)
 #else
 #define TRACE_INFO(msg...)
 #endif /*TRACE_LEVEL > TRACE_LEVEL_WARNING*/
 #if TRACE_LEVEL > TRACE_LEVEL_INFO
-#define TRACE_DEBUG(msg...)		SEGGER_TRACE(msg); TRACE_OUT(msg)
+#define TRACE_DEBUG(msg...)		TRACE_OUT(msg)
 #else
 #define TRACE_DEBUG(msg...)
 #endif /*TRACE_LEVEL > TRACE_LEVEL_INFO*/
 
 #define TRACE					TRACE_INFO
-#define TRACE_IRQ				SEGGER_TRACE_IRQ
+#define TRACE_IRQ
 
 #endif /* INC_TRACE_H_ */

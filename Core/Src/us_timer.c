@@ -2,7 +2,7 @@
 
 static uint8_t us_timer_elapsed = 0;
 
-void us_timer_start(TIM_HandleTypeDef *htim, uint32_t us)
+void usTimer_Start(TIM_HandleTypeDef *htim, uint32_t us)
 {
 	if (us < 1) return;
 
@@ -22,7 +22,7 @@ void us_timer_start(TIM_HandleTypeDef *htim, uint32_t us)
  * @brief Call when timer elapsed
  * @param htim
  */
-void us_timer_callback(TIM_HandleTypeDef *htim)
+void usTimer_Callback(TIM_HandleTypeDef *htim)
 {
 	HAL_TIM_Base_Stop_IT(htim);
 

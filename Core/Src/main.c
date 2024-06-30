@@ -474,7 +474,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim == &htim1)
     {
-        us_timer_callback(&htim1);
+        usTimer_Callback(&htim1);
     }
 }
 /* USER CODE END 4 */

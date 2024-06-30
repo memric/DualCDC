@@ -3,8 +3,8 @@
 
 #include "main.h"
 
-uint32_t us_timer_init(void);
-void us_timer_start(TIM_HandleTypeDef *htim, uint32_t us);
-void us_timer_callback(TIM_HandleTypeDef *htim);
+uint32_t usTimer_Init(void);
+void usTimer_Start(TIM_HandleTypeDef *htim, uint32_t us);
+void usTimer_Callback(TIM_HandleTypeDef *htim);
 
 #endif /*US_TIMER_H_*/

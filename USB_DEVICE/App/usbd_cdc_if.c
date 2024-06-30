@@ -519,7 +519,7 @@ void UART_Poll(void)
     /* Check if DE signal need to be set low */
     if (de_pending)
     {
-        us_timer_start(&htim1, DE_WAIT_US);
+        usTimer_Start(&htim1, DE_WAIT_US);
         HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_RESET); //TODO Use us timer
 
         de_pending = 0;
@@ -536,7 +536,7 @@ void UART_Poll(void)
             if (uart->huart == &huart1)
             {
                 /* Set DE signal UP for RS485 */
-                us_timer_start(&htim1, DE_WAIT_US);
+                usTimer_Start(&htim1, DE_WAIT_US);
                 HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
             }
 
@@ -554,20 +554,12 @@ void UART_Poll(void)
 
             TRACE_DEBUG("Rx data ready. %s; Size %"PRIu16"\r\n", uart->name, len);
 
-            uint32_t i;
-            for (i = 0; i < len; i++)
-            {
-                TRACE_DEBUG("%02X ", usb_tx_buf[i]);
-            }
-            TRACE_DEBUG("\r\n");
+            err = CDC_Transmit_FS(usb_tx_buf, len, ind * 2);
 
-            do
+            if (err == USBD_OK)
             {
-                err = CDC_Transmit_FS(usb_tx_buf, len, ind * 2);
+                HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
             }
-            while (err != USBD_OK);
-
-            HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
         }
     }
 }

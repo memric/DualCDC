@@ -53,21 +53,24 @@ typedef struct {
         ring_buf_t *pRbuf;
         uint32_t last_rx_tick;
         uint32_t rx_timeout;
-        uint8_t *pTbuf;
-        uint32_t tx_len;
+        ring_buf_t *pTbuf;
+//        uint32_t tx_len;
 } uart_handle_t;
 
 extern void Lock(void *arg);
 extern void Unlock(void *arg);
 
+/* UART Rx/Tx FIFOs */
 RING_BUF_DEFINE(uart1_rx, UART_RX_BUF_LEN, uint8_t, Lock, Unlock);
 RING_BUF_DEFINE(uart2_rx, UART_RX_BUF_LEN, uint8_t, Lock, Unlock);
-uint8_t uart1_tx[UART_TX_BUF_LEN];
-uint8_t uart2_tx[UART_TX_BUF_LEN];
+RING_BUF_DEFINE(uart1_tx, UART_TX_BUF_LEN, uint8_t, Lock, Unlock);
+RING_BUF_DEFINE(uart2_tx, UART_TX_BUF_LEN, uint8_t, Lock, Unlock);
+static uint8_t usb_rx_buf[USB_TX_BUF_LEN];
+static uint8_t usb_tx_buf[USB_TX_BUF_LEN];
 
-uart_handle_t hUART[] = {
-{"UART1", &huart1, 0, pRING_BUF(uart1_rx), 0, 10, uart1_tx, 0},
-{"UART2", &huart2, 0, pRING_BUF(uart2_rx), 0, 10, uart2_tx, 0}
+static uart_handle_t hUART[] = {
+{"UART1", &huart1, 0, pRING_BUF(uart1_rx), 0, 10, pRING_BUF(uart1_tx)},
+{"UART2", &huart2, 0, pRING_BUF(uart2_rx), 0, 10, pRING_BUF(uart2_tx)}
 };
 
 static uint8_t de_pending = 0;
@@ -340,8 +343,9 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
                 Error_Handler();
             }
 
-            /* Set ring buffer reset state */
+            /* Set ring buffers reset state */
             RingBuf_Init(uart->pRbuf);
+            RingBuf_Init(uart->pTbuf);
 
             /* Calculate timeout */
             uart->rx_timeout = UART_BYTES2WAIT * 1000
@@ -351,8 +355,6 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
             {
                 uart->rx_timeout = 1;
             }
-
-            uart->tx_len = 0;
 
             TRACE_DEBUG("%s timeout: %"PRIu32" ms\r\n", uart->name, uart->rx_timeout);
 
@@ -420,12 +422,9 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len, uint16_t index)
 #else
   uart_handle_t *uart = &hUART[index / 2];
 
-  if (uart->tx_len == 0)
-  {
-      memcpy(uart->pTbuf, Buf, *Len);
-      uart->tx_len = *Len;
-  }
-  else
+  rbuf_size_t cp_len = RingBuf_Push(uart->pTbuf, Buf, *Len);
+
+  if (cp_len < *Len)
   {
       return USBD_FAIL;
   }
@@ -490,7 +489,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
     if (uart != NULL)
     {
-        uart->tx_len = 0;
+//        uart->tx_len = 0;
 
         if (huart == &huart1)
         {
@@ -518,7 +517,6 @@ void UART_Poll(void)
 {
     uint16_t ind;
     uart_handle_t *uart = NULL;
-    uint8_t usb_tx_buf[USB_TX_BUF_LEN];
     uint8_t err;
 
     /* Check if DE signal need to be set low */
@@ -535,7 +533,8 @@ void UART_Poll(void)
         uart = &hUART[ind];
 
         /* Check for Tx first */
-        if ((uart->tx_len > 0)
+        rbuf_size_t tx_available = RingBuf_Pop(uart->pTbuf, usb_rx_buf, sizeof(usb_rx_buf));
+        if (tx_available
             && ((HAL_UART_GetState(uart->huart) & HAL_UART_STATE_BUSY_TX) == HAL_UART_STATE_READY))
         {
             if (uart->huart == &huart1)
@@ -545,17 +544,17 @@ void UART_Poll(void)
                 HAL_GPIO_WritePin(DE_GPIO_Port, DE_Pin, GPIO_PIN_SET);
             }
 
-            TRACE_DEBUG("Tx data ready. %s; Size %"PRIu32"\r\n", uart->name, uart->tx_len);
+            TRACE_DEBUG("Tx data ready. %s; Size %i\r\n", uart->name, tx_available);
 
             /* Have pending data for Tx. Start DMA transfer */
-            HAL_UART_Transmit_DMA(uart->huart, uart->pTbuf, uart->tx_len);
+            HAL_UART_Transmit_DMA(uart->huart, usb_rx_buf, tx_available);
         }
 
         /* Check for Rx data */
         if (((HAL_GetTick() - uart->last_rx_tick) > uart->rx_timeout)
             && (RingBuf_GetNum(uart->pRbuf) > 0))
         {
-            uint16_t len = RingBuf_Pop(uart->pRbuf, usb_tx_buf, USB_TX_BUF_LEN);
+            uint16_t len = RingBuf_Pop(uart->pRbuf, usb_tx_buf, sizeof(usb_tx_buf));
 
             TRACE_DEBUG("Rx data ready. %s; Size %"PRIu16"\r\n", uart->name, len);
 

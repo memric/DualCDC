@@ -36,6 +36,9 @@
 #define USB_TX_BUF_LEN      256
 #define UART_BYTES2WAIT     3.5
 #define DE_WAIT_US          100
+
+#define UART2_EBUS          1
+
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
@@ -356,6 +359,14 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length, uint16
                 uart->rx_timeout = 1;
             }
 
+#if UART2_EBUS
+            /* For eBus converter disable timeout */
+            if (uart->huart == &huart2)
+            {
+                uart->rx_timeout = 0;
+            }
+#endif
+
             TRACE_DEBUG("%s timeout: %"PRIu32" ms\r\n", uart->name, uart->rx_timeout);
 
         }
@@ -531,6 +542,11 @@ void UART_Poll(void)
     for (ind = 0; ind < sizeof(hUART) / sizeof(uart_handle_t); ind++)
     {
         uart = &hUART[ind];
+
+        if (uart == NULL || uart->pTbuf == NULL || uart->pRbuf == NULL)
+        {
+            return;
+        }
 
         /* Check for Tx first */
         rbuf_size_t tx_available = RingBuf_Pop(uart->pTbuf, usb_rx_buf, sizeof(usb_rx_buf));
